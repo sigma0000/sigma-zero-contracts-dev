@@ -2,7 +2,7 @@
 
 # Sigma Zero Contract
 
-This is the contract for Sigma Zero
+This is the smart contract which handles Sigma Zero events.
 
 ## Table of Contents
 
