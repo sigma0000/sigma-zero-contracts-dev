@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "hardhat/console.sol";
 
 contract SigmaZero is AccessControl {
     uint public betCount;
@@ -45,6 +44,7 @@ contract SigmaZero is AccessControl {
 
     event BetPlaced(
         address indexed initiator,
+        address tokenAddress,
         BetType betType,
         uint wager,
         uint32 duration,
@@ -61,6 +61,7 @@ contract SigmaZero is AccessControl {
     event BetSettled(
         uint indexed betIndex,
         address indexed initiator,
+        bool isFirstGroupWinner,
         Bettor[] firstBettorsGroup,
         Bettor[] secondBettorsGroup,
         BetType betType,
@@ -116,7 +117,7 @@ contract SigmaZero is AccessControl {
             Bettor({bettor: msg.sender, wager: wager})
         );
 
-        emit BetPlaced(msg.sender, betType, wager, duration, betCount);
+        emit BetPlaced(msg.sender, tokenAddress, betType, wager, duration, betCount);
     }
 
     function setBetValue(
@@ -272,6 +273,7 @@ contract SigmaZero is AccessControl {
         emit BetSettled(
             betIndex,
             bet.initiator,
+            isFirstGroupWinner,
             firstBettorsGroup,
             secondBettorsGroup,
             bet.betType,
