@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "hardhat/console.sol";
 
 contract SigmaZero is AccessControl {
     uint public betCount;
@@ -31,7 +32,7 @@ contract SigmaZero is AccessControl {
         uint secondBettorsGroupPool;
         address tokenAddress;
         uint32 duration;
-        uint64 startDateTime;
+        uint64 timestamp;
         BetType betType;
         BetStatus status;
         // This is the value related to the bet type: liquidity, volume, price
@@ -44,7 +45,6 @@ contract SigmaZero is AccessControl {
 
     event BetPlaced(
         address indexed initiator,
-        address tokenAddress,
         BetType betType,
         uint wager,
         uint32 duration,
@@ -61,7 +61,6 @@ contract SigmaZero is AccessControl {
     event BetSettled(
         uint indexed betIndex,
         address indexed initiator,
-        bool isFirstGroupWinner,
         Bettor[] firstBettorsGroup,
         Bettor[] secondBettorsGroup,
         BetType betType,
@@ -107,7 +106,7 @@ contract SigmaZero is AccessControl {
             secondBettorsGroupPool: 0,
             tokenAddress: tokenAddress,
             duration: duration,
-            startDateTime: 0,
+            timestamp: uint64(block.timestamp),
             betType: betType,
             status: BetStatus.Initiated,
             value: 0
@@ -117,18 +116,22 @@ contract SigmaZero is AccessControl {
             Bettor({bettor: msg.sender, wager: wager})
         );
 
-        emit BetPlaced(msg.sender, tokenAddress, betType, wager, duration, betCount);
+        emit BetPlaced(msg.sender, betType, wager, duration, betCount);
     }
 
     function setBetValue(
         uint betIndex,
-        uint value,
-        uint64 startDateTime
-    ) external onlyAdmin betExists(betIndex) betInitiated(betIndex) {
+        uint value
+    )
+        external
+        onlyAdmin
+        betExists(betIndex)
+        betNotExpired(betIndex)
+        betInitiated(betIndex)
+    {
         Bet storage bet = bets[betIndex];
         bet.value = value;
         bet.status = BetStatus.Approved;
-        bet.startDateTime = startDateTime;
 
         emit BetApproved(betIndex, bet.initiator, bet.betType);
     }
@@ -201,10 +204,10 @@ contract SigmaZero is AccessControl {
         external
         payable
         betExists(betIndex)
-        betNotClosed(betIndex)
-        betApproved(betIndex)
         betNotExpired(betIndex)
         betNotSettled(betIndex)
+        betNotClosed(betIndex)
+        betApproved(betIndex)
     {
         Bet storage bet = bets[betIndex];
         require(bettingGroup <= 2, "Invalid betting group");
@@ -273,7 +276,6 @@ contract SigmaZero is AccessControl {
         emit BetSettled(
             betIndex,
             bet.initiator,
-            isFirstGroupWinner,
             firstBettorsGroup,
             secondBettorsGroup,
             bet.betType,
@@ -313,7 +315,7 @@ contract SigmaZero is AccessControl {
 
     modifier betNotExpired(uint betIndex) {
         require(
-            bets[betIndex].startDateTime + bets[betIndex].duration >
+            bets[betIndex].timestamp + bets[betIndex].duration >
                 block.timestamp,
             "Bet has expired"
         );
