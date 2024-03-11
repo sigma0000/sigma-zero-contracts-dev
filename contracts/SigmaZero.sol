@@ -20,6 +20,11 @@ contract SigmaZero is AccessControl {
         Voided
     }
 
+    enum WageringStyle {
+        Single,
+        Group
+    }
+
     struct Bettor {
         address bettor;
         uint wager;
@@ -34,13 +39,15 @@ contract SigmaZero is AccessControl {
         uint64 startDateTime;
         BetType betType;
         BetStatus status;
-        // This is the value related to the bet type: liquidity, volume, price
         uint value;
+        uint settledValue;
     }
 
     mapping(uint => Bet) public bets;
     mapping(uint => Bettor[]) public firstBettorsGroupByBetIndex;
     mapping(uint => Bettor[]) public secondBettorsGroupByBetIndex;
+    mapping(uint => mapping(address => bool)) public isBettorParticipated;
+    mapping(uint => mapping(address => bool)) public hasClaimedReward;
 
     event BetPlaced(
         address indexed initiator,
@@ -48,7 +55,12 @@ contract SigmaZero is AccessControl {
         BetType betType,
         uint wager,
         uint32 duration,
-        uint indexed betIndex
+        uint indexed betIndex,
+        uint value,
+        uint auxiliaryValue,
+        bytes32 option,
+        WageringStyle wageringStyle,
+        uint64 startDateTime
     );
 
     event BettorAdded(
@@ -89,6 +101,11 @@ contract SigmaZero is AccessControl {
         BetType betType
     );
 
+    event RewardsClaimed(
+        address bettor, 
+        uint amount
+    );
+
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
     }
@@ -97,7 +114,12 @@ contract SigmaZero is AccessControl {
         address tokenAddress,
         uint32 duration,
         BetType betType,
-        uint wager
+        uint wager,
+        uint value,
+        uint auxiliaryValue,
+        bytes32 option,
+        uint64 startDateTime,
+        WageringStyle wageringStyle
     ) external payable {
         betCount++;
 
@@ -107,33 +129,45 @@ contract SigmaZero is AccessControl {
             secondBettorsGroupPool: 0,
             tokenAddress: tokenAddress,
             duration: duration,
-            startDateTime: 0,
+            startDateTime: startDateTime,
             betType: betType,
             status: BetStatus.Initiated,
-            value: 0
+            value: 0,
+            settledValue: 0
         });
 
         firstBettorsGroupByBetIndex[betCount].push(
             Bettor({bettor: msg.sender, wager: wager})
         );
 
-        emit BetPlaced(msg.sender, tokenAddress, betType, wager, duration, betCount);
+        isBettorParticipated[betCount][msg.sender] = true;
+
+        emit BetPlaced(
+            msg.sender, 
+            tokenAddress, 
+            betType, 
+            wager, 
+            duration, 
+            betCount, 
+            value,
+            auxiliaryValue,
+            option,
+            wageringStyle,
+            startDateTime
+        );
     }
 
     function setBetValue(
         uint betIndex,
-        uint value,
-        uint64 startDateTime
+        uint value
     ) external onlyAdmin betExists(betIndex) betInitiated(betIndex) {
         Bet storage bet = bets[betIndex];
         bet.value = value;
         bet.status = BetStatus.Approved;
-        bet.startDateTime = startDateTime;
 
         emit BetApproved(betIndex, bet.initiator, bet.betType);
     }
 
-    //TODO: check if it's a good idea to allow the admin to void a bet
     function voidBet(
         uint betIndex
     )
@@ -170,7 +204,6 @@ contract SigmaZero is AccessControl {
         emit BetVoided(betIndex, bet.initiator, bet.betType);
     }
 
-    //TODO: this is needed to set a limit to the time the users have to bet, check with client
     function closeBet(
         uint betIndex
     )
@@ -208,6 +241,7 @@ contract SigmaZero is AccessControl {
     {
         Bet storage bet = bets[betIndex];
         require(bettingGroup <= 2, "Invalid betting group");
+        require(!isBettorParticipated[betIndex][msg.sender], "Bettor already participated");
 
         Bettor memory bettor = Bettor({bettor: msg.sender, wager: wager});
 
@@ -218,6 +252,8 @@ contract SigmaZero is AccessControl {
             secondBettorsGroupByBetIndex[betIndex].push(bettor);
             bet.secondBettorsGroupPool += wager;
         }
+
+        isBettorParticipated[betIndex][msg.sender] = true;
 
         emit BettorAdded(msg.sender, betIndex, wager, bettingGroup);
     }
@@ -239,7 +275,9 @@ contract SigmaZero is AccessControl {
             "Bet is not closed, cannot settle"
         );
 
-        // Check which group won
+        bet.status = BetStatus.Settled;
+        bet.settledValue = value;
+
         bool isFirstGroupWinner = value >= bet.value;
         Bettor[] memory winners = isFirstGroupWinner
             ? firstBettorsGroupByBetIndex[betIndex]
@@ -252,16 +290,18 @@ contract SigmaZero is AccessControl {
             : bet.firstBettorsGroupPool;
 
         uint[] memory payouts = new uint[](winners.length);
-        // Perform calculations and distribute winnings
+
         for (uint i = 0; i < winners.length; i++) {
             Bettor memory bettor = winners[i];
             address payable bettorAddress = payable(bettor.bettor);
             uint payout = ((bettor.wager * pool) / selfPool) + bettor.wager;
-            bettorAddress.transfer(payout);
+            bool sent = bettorAddress.send(payout);
+
+            if(sent) {
+                hasClaimedReward[betIndex][bettor.bettor] = true;
+            }
             payouts[i] = payout;
         }
-
-        bet.status = BetStatus.Settled;
 
         Bettor[] memory firstBettorsGroup = firstBettorsGroupByBetIndex[
             betIndex
@@ -280,6 +320,39 @@ contract SigmaZero is AccessControl {
             winners,
             payouts
         );
+    }
+
+    function calculateBettorRewards(address sender, uint betIndex) internal view returns (uint) {
+        Bet storage bet = bets[betIndex];
+        bool isFirstGroupWinner = bet.settledValue >= bet.value;
+        uint selfPool = isFirstGroupWinner ? bet.firstBettorsGroupPool : bet.secondBettorsGroupPool;
+        uint pool = isFirstGroupWinner ? bet.secondBettorsGroupPool : bet.firstBettorsGroupPool;
+
+        Bettor[] storage winners = isFirstGroupWinner ? firstBettorsGroupByBetIndex[betIndex] : secondBettorsGroupByBetIndex[betIndex];
+
+        for (uint i = 0; i < winners.length; i++) {
+            Bettor storage bettor = winners[i];
+
+            if(bettor.bettor == sender) {
+                uint payout = ((bettor.wager * pool) / selfPool) + bettor.wager;
+                return payout;
+            }
+        }
+
+        return 0;
+    }
+
+    function claimRewards(uint betIndex) external {
+        require(bets[betIndex].status == BetStatus.Settled, "Bet is not settled");
+        require(isBettorParticipated[betIndex][msg.sender], "Bettor did not participate");
+        require(!hasClaimedReward[betIndex][msg.sender], "Reward already claimed");
+
+        uint rewardAmount = calculateBettorRewards(msg.sender, betIndex);
+        require(rewardAmount > 0, "No rewards to claim");
+
+        bool sent = payable(msg.sender).send(rewardAmount);
+        require(sent, "Failed to send reward");
+        hasClaimedReward[betIndex][msg.sender] = true;
     }
 
     modifier betExists(uint betIndex) {
